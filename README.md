@@ -4,6 +4,8 @@ Rust/egui GUI for controlling VIA/Vial keyboard RGB (per-key colors + a
 Python-viz-style audio visualizer relay) and driving it from audio bands
 or the desktop wallpaper. Rust port of `viz-frame-tools`' `viz_gui.py`.
 
+<img width="666" height="938" alt="grafik" src="https://github.com/user-attachments/assets/f0138e0e-260f-4282-a9fe-83fb7191b395" />
+
 ## Linux setup
 
 ### hidraw permission (all distros)
