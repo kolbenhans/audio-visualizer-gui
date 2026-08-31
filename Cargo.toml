@@ -1,0 +1,17 @@
+[package]
+name = "audio-visualizer-gui"
+version = "0.1.0-beta"
+edition = "2021"
+
+[dependencies]
+eframe = "0.34.3"
+egui = "0.34.3"
+egui_extras = { version = "0.34.3", features = ["image"] }
+hidapi = "2.6.6"
+rustfft = "6"
+lzma-rs = "0.3"
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+opt-level = 2

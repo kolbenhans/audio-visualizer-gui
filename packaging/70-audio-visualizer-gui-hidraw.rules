@@ -1,0 +1,16 @@
+# Grants the active graphical-session user read/write access to raw-HID
+# device nodes -- needed because VIA/Vial keyboards (ID75, Sofle, ...) talk
+# to audio-visualizer-gui over a raw HID interface (usage page 0xFF60), and /dev/hidraw*
+# is root-only by default on most distros (this bit us first on Fedora:
+# "Failed to open a device with path '/dev/hidraw*': Permission denied").
+#
+# TAG+="uaccess" hands access to whoever is logged into the seat via
+# systemd-logind -- no group membership, no reboot, just replug the keyboard
+# (or `sudo udevadm trigger`) after installing this. Same approach QMK's own
+# udev rules and Vial use.
+#
+# Install:
+#   sudo cp packaging/70-audio-visualizer-gui-hidraw.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", MODE="0660", TAG+="uaccess"
