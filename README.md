@@ -7,7 +7,7 @@ or the desktop wallpaper. Rust port of `viz-frame-tools`' `viz_gui.py`.
 ---
 
 <details>
-<summary>Previes</summary>
+<summary>Preview</summary>
 <img width="666" height="938" alt="grafik" src="https://github.com/user-attachments/assets/f0138e0e-260f-4282-a9fe-83fb7191b395" />
 </details>
 
