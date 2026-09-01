@@ -62,9 +62,9 @@ Auto-detected at startup, first match wins, override via the ☰ menu:
 
 1. Caelestia -- `~/.local/state/caelestia/wallpaper/path.txt`
 2. Omarchy 4 -- `~/.local/state/omarchy/current/background`
-3. Omarchy 3 -- `~/.config/omarchy/current/background`
-4. hyprpaper -- `~/.config/hypr/hyprpaper.conf`
-5. KDE Plasma -- `~/.config/plasma-org.kde.plasma.desktop-appletsrc`
+3. Omarchy 3 -- `~/.config/omarchy/current/background` (*untested)
+4. hyprpaper -- `~/.config/hypr/hyprpaper.conf` (*untested)
+5. KDE Plasma -- `~/.config/plasma-org.kde.plasma.desktop-appletsrc` (*untested)
 
 GNOME (dconf, no plain file) and COSMIC aren't supported yet.
 
