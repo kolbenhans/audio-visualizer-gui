@@ -1,8 +1,17 @@
-# Audiovisualizer (audio-visualizer-gui)
+# Audio Visualizer GUI
 
-Rust/egui GUI for controlling VIA/Vial keyboard RGB (per-key colors + a
-Python-viz-style audio visualizer relay) and driving it from audio bands
-or the desktop wallpaper. Rust port of `viz-frame-tools`' `viz_gui.py`.
+A **Rust/egui desktop application for VIA/Vial-compatible keyboards**, combining per-key RGB control with a real-time audio-reactive visualizer.
+
+The application communicates directly with the keyboard over USB HID and can drive RGB effects from:
+
+* 🎵 system audio / frequency bands
+* 🖼️ desktop wallpaper colors
+* 🎨 per-key color configuration
+* 🌈 color palettes
+* 🖥️ screen-based color sampling
+* 🌄 wallpaper state
+
+The project is a Rust port of the `viz_gui.py` interface from `viz-frame-tools`.
 
 ---
 
@@ -12,49 +21,123 @@ or the desktop wallpaper. Rust port of `viz-frame-tools`' `viz_gui.py`.
 </details>
 
 ---
+## Features
 
-## Linux setup
+* **VIA/Vial keyboard support**
+* **Per-key RGB color configuration**
+* **Audio-reactive RGB visualization**
+* **FFT / frequency-band processing**
+* **Audio peak detection**
+* **Wallpaper color extraction**
+* **Color-Shot / screen color sampling**
+* **Ambient screen visualization**
+* **WPWatch wallpaper monitoring**
+* **Direct USB HID communication**
+* **Rust + egui desktop GUI**
+* **Linux support**
+* **AppImage packaging**
 
-### hidraw permission (all distros)
+The actual RGB animation is rendered by the keyboard firmware. The desktop application acts as the host-side controller and data source.
+---
 
-`/dev/hidraw*` is root-only by default. Without a udev rule, Connect fails
-with:
+# Linux Setup
 
+Several features require additional Linux configuration or system packages.
+
+## USB HID permissions
+
+Linux normally restricts access to `/dev/hidraw*` to root.
+
+Without a udev rule, connecting to the keyboard may fail with an error similar to:
+
+```text
+connect failed: hidapi error:
+Failed to open a device with path '/dev/hidraw5':
+Permission denied
 ```
-connect failed: hidapi error: Failed to open a device with path '/dev/hidraw5': Permission denied
-```
 
-Fix:
+Install the included udev rule:
 
 ```bash
-sudo cp packaging/70-audio-visualizer-gui-hidraw.rules /etc/udev/rules.d/
+sudo cp packaging/70-audio-visualizer-gui-hidraw.rules \
+    /etc/udev/rules.d/
+```
+
+Reload the rules:
+
+```bash
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-Then replug the keyboard (no reboot needed). The app also prints this hint
-itself when it hits a permission-denied connect failure.
+Then **unplug and reconnect the keyboard**.
 
-### Audio bands / Color-Shot / WPWatch / Ambient
+A reboot is not required.
 
-Audio capture uses `pactl`/`parec` (PulseAudio/PipeWire) as subprocesses --
-if the status bar shows `audio sources unavailable: ...`, those binaries
-aren't on `PATH`, or nothing on the system provides a PulseAudio-compatible
-socket.
+The application also reports a corresponding hint when it encounters a permission-denied HID connection failure.
 
-**Fedora**: ships PipeWire by default, but not its PulseAudio-compat CLI --
-that's the separate `pulseaudio-utils` package (unlike Debian/Ubuntu, where
-`pipewire-pulse` pulls it in automatically):
+---
+
+## Audio Capture
+
+Audio capture uses the PulseAudio-compatible command-line tools:
+
+* `pactl`
+* `parec`
+
+This works with systems using PulseAudio as well as PipeWire's PulseAudio compatibility layer.
+
+If the application reports:
+
+```text
+audio sources unavailable: ...
+```
+
+check that:
+
+1. `pactl` and `parec` are installed and available in `PATH`
+2. a PulseAudio-compatible socket is available
+3. your audio server is running
+
+### Fedora
+
+Fedora uses PipeWire by default, but the PulseAudio-compatible command-line utilities are provided separately.
+
+Install them with:
 
 ```bash
 sudo dnf install pulseaudio-utils
 ```
 
-Screen-capture features (Color-Shot, Ambient, and the monitor picker) shell
-out to `hyprctl`/`grim` and only work under Hyprland. On other compositors
-the status bar will say `monitor picker needs Hyprland` -- WPWatch (reading
-the wallpaper file itself) doesn't need Hyprland and works anywhere the
-wallpaper-state path can be found (see below).
+On Debian/Ubuntu-based systems, the required compatibility packages may already be installed depending on the audio setup.
+
+---
+
+# Hyprland Features
+
+Some visual features use screen capture and are currently implemented through Hyprland-specific tools.
+
+The following features require **Hyprland**:
+
+* Color-Shot
+* Ambient
+* monitor picker
+
+They use:
+
+* `hyprctl`
+* `grim`
+
+Install the required tools according to your distribution.
+
+On other Wayland compositors the application will report:
+
+```text
+monitor picker needs Hyprland
+```
+
+These features are therefore currently **Hyprland-specific**.
+---
 
 ### Wallpaper detection (WPWatch)
 
@@ -66,7 +149,18 @@ Auto-detected at startup, first match wins, override via the ☰ menu:
 4. hyprpaper -- `~/.config/hypr/hyprpaper.conf` (*untested)
 5. KDE Plasma -- `~/.config/plasma-org.kde.plasma.desktop-appletsrc` (*untested)
 
-GNOME (dconf, no plain file) and COSMIC aren't supported yet.
+The wallpaper source can also be overridden manually from the application's menu.
+
+> Some wallpaper integrations are currently untested.
+
+### Current limitations
+
+The following wallpaper systems are currently not supported:
+
+* GNOME — wallpaper state is stored in dconf rather than a directly readable file
+* COSMIC
+
+---
 
 ## Building
 
