@@ -96,6 +96,12 @@ struct App {
     render_thread: Option<JoinHandle<()>>,
     status: String,
 
+    // Board RGB Matrix popup (VialRGB's onboard effects -- separate from the
+    // KeyLighting/Visualizer Effect toggle above, see hid.rs's RGB_MODE).
+    rgb_matrix_open: bool,
+    rgb_matrix_mode: Option<hid::RgbMatrixMode>,
+    rgb_matrix_supported: Vec<u16>,
+
     // Screen-capture palette sources (Hyprland/grim-specific).
     gamma: f32,
     shared_gamma: Arc<Mutex<f32>>,
@@ -172,6 +178,10 @@ impl App {
             render_stop: None,
             render_thread: None,
             status: format!("not connected — {audio_note} — {monitor_note}"),
+
+            rgb_matrix_open: false,
+            rgb_matrix_mode: None,
+            rgb_matrix_supported: Vec::new(),
 
             gamma: 1.6,
             shared_gamma: Arc::new(Mutex::new(1.6)),
@@ -252,6 +262,97 @@ impl App {
                 )
             }
             Err(e) => self.status = format!("connect failed: {e}"),
+        }
+    }
+
+    /// Fetches the board's current RGB Matrix mode + supported effect list
+    /// once, on first popup open (cheap to keep cached after that -- the
+    /// popup itself is the only thing that changes it, so no need to
+    /// re-poll every frame).
+    fn open_rgb_matrix_popup(&mut self) {
+        let Some(kb) = self.kb.clone() else { return };
+        let Ok(kb) = kb.lock() else { return };
+        match kb.get_rgb_matrix_mode() {
+            Ok(mode) => self.rgb_matrix_mode = Some(mode),
+            Err(e) => self.status = format!("Board RGB: get mode failed: {e}"),
+        }
+        match kb.get_supported_rgb_effects() {
+            Ok(ids) => self.rgb_matrix_supported = ids,
+            Err(e) => self.status = format!("Board RGB: get supported effects failed: {e}"),
+        }
+    }
+
+    /// Floating popup (not a Frame section -- window space is tight) for
+    /// VialRGB's onboard RGB Matrix mode. Works on a local copy of
+    /// rgb_matrix_mode so the inner closure needs no `self` borrow at all;
+    /// written back to self + the keyboard only after the window closes for
+    /// this frame.
+    fn show_rgb_matrix_popup(&mut self, ctx: &egui::Context) {
+        if !self.rgb_matrix_open {
+            return;
+        }
+        let Some(mut mode) = self.rgb_matrix_mode else {
+            self.rgb_matrix_open = false; // fetch failed on open, see open_rgb_matrix_popup
+            return;
+        };
+        let supported = self.rgb_matrix_supported.clone();
+
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new("Board RGB Matrix")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Onboard RGB Matrix effect (VialRGB) — separate from KeyLighting/Visualizer above.");
+                ui.separator();
+
+                egui::ComboBox::from_id_salt("rgb_matrix_effect")
+                    .selected_text(hid::rgb_effect_name(mode.effect))
+                    .show_ui(ui, |ui| {
+                        for &id in &supported {
+                            if ui
+                                .selectable_value(&mut mode.effect, id, hid::rgb_effect_name(id))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+
+                changed |= ui.add(egui::Slider::new(&mut mode.speed, 0..=255).text("Speed")).changed();
+
+                // Vial-style SV square + hue bar, replacing separate
+                // Hue/Sat/Brightness sliders -- the widget's V axis IS
+                // brightness (firmware's val byte), same wire field.
+                let mut hsva = egui::ecolor::Hsva::new(
+                    mode.hue as f32 / 255.0,
+                    mode.sat as f32 / 255.0,
+                    mode.val as f32 / 255.0,
+                    1.0,
+                );
+                if egui::widgets::color_picker::color_picker_hsva_2d(
+                    ui,
+                    &mut hsva,
+                    egui::widgets::color_picker::Alpha::Opaque,
+                ) {
+                    mode.hue = (hsva.h * 255.0).round().clamp(0.0, 255.0) as u8;
+                    mode.sat = (hsva.s * 255.0).round().clamp(0.0, 255.0) as u8;
+                    mode.val = (hsva.v * 255.0).round().clamp(0.0, 255.0) as u8;
+                    changed = true;
+                }
+            });
+
+        self.rgb_matrix_open = open;
+        self.rgb_matrix_mode = Some(mode);
+
+        if changed {
+            if let Some(kb) = self.kb.clone() {
+                if let Ok(kb) = kb.lock() {
+                    if let Err(e) = kb.set_rgb_matrix_mode(&mode) {
+                        self.status = format!("Board RGB: set failed: {e}");
+                    }
+                }
+            }
         }
     }
 
@@ -707,9 +808,24 @@ impl eframe::App for App {
                         {
                             self.set_effect(Effect::PythonViz);
                         }
+                        // Not an Effect variant -- opens the popup below.
+                        // Board RGB Matrix (VialRGB) is independent of
+                        // KeyLighting/Visualizer: it drives the firmware's
+                        // own stock animations, not host-streamed frames.
+                        if ui
+                            .add(egui::Button::new("Board RGB").min_size(egui::vec2(100.0 * scale, 28.0 * scale)).selected(self.rgb_matrix_open))
+                            .clicked()
+                        {
+                            self.rgb_matrix_open = !self.rgb_matrix_open;
+                            if self.rgb_matrix_open && self.rgb_matrix_mode.is_none() {
+                                self.open_rgb_matrix_popup();
+                            }
+                        }
                     });
                 });
             });
+
+            self.show_rgb_matrix_popup(ui.ctx());
 
             ui.separator();
 
