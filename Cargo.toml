@@ -12,6 +12,11 @@ rustfft = "6"
 lzma-rs = "0.3"
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+material-colors = "0.5.0"
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.24.0"
+xcap = "0.9.8"
 
 [profile.release]
 opt-level = 2

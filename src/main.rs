@@ -102,9 +102,18 @@ struct App {
     rgb_matrix_mode: Option<hid::RgbMatrixMode>,
     rgb_matrix_supported: Vec<u16>,
 
+    // Global brightness (rgb_matrix hsv.v), independent of KeyColors/
+    // Visualizer/Board RGB -- see hid.rs's RGB_MATRIX_BRIGHTNESS. None until
+    // fetched on connect (slider stays disabled with kb, see UI).
+    brightness: Option<u8>,
+
     // Screen-capture palette sources (Hyprland/grim-specific).
     gamma: f32,
     shared_gamma: Arc<Mutex<f32>>,
+    // Material You scheme (see palette.rs) vs. each source's original
+    // literal-color extraction; live-adjustable the same way gamma is.
+    color_variant: palette::ColorVariant,
+    shared_color_variant: Arc<Mutex<palette::ColorVariant>>,
     ambient_interval_ms: u32, // GUI-bound; live-adjustable while Ambient runs via shared_ambient_interval_ms
     shared_ambient_interval_ms: Arc<Mutex<u32>>,
     monitors: Vec<(String, String)>, // (hyprctl output name, display label)
@@ -182,9 +191,12 @@ impl App {
             rgb_matrix_open: false,
             rgb_matrix_mode: None,
             rgb_matrix_supported: Vec::new(),
+            brightness: None,
 
             gamma: 1.6,
             shared_gamma: Arc::new(Mutex::new(1.6)),
+            color_variant: palette::ColorVariant::Zones,
+            shared_color_variant: Arc::new(Mutex::new(palette::ColorVariant::Zones)),
             ambient_interval_ms: 200,
             shared_ambient_interval_ms: Arc::new(Mutex::new(200)),
             monitors,
@@ -254,7 +266,12 @@ impl App {
 
                 let _ = kb.activate_key_colors();
                 self.effect = Effect::KeyLighting;
+                self.brightness = kb.get_brightness().ok();
                 self.kb = Some(Arc::new(Mutex::new(kb)));
+                // Primes rgb_matrix_mode/rgb_matrix_supported so the Board
+                // RGB popup has the board's real state right away instead
+                // of fetching on first open.
+                self.open_rgb_matrix_popup();
             }
             Err(e) if e.contains("Permission denied") => {
                 self.status = format!(
@@ -262,6 +279,32 @@ impl App {
                 )
             }
             Err(e) => self.status = format!("connect failed: {e}"),
+        }
+    }
+
+    fn disconnect(&mut self) {
+        self.stop_bars();
+        self.kb = None;
+        self.effect = Effect::KeyLighting;
+        self.rgb_matrix_open = false;
+        self.rgb_matrix_mode = None;
+        self.rgb_matrix_supported.clear();
+        self.brightness = None;
+        self.status = "disconnected".into();
+    }
+
+    /// Global brightness, via the brightness-only VIA value (see hid.rs's
+    /// RGB_MATRIX_BRIGHTNESS) -- deliberately NOT routed through
+    /// set_rgb_matrix_mode/RGB_MODE: that command's effect field can't
+    /// represent the key_colors/audio_visualizer community-module effects,
+    /// so echoing the "current" effect back while one of those is active
+    /// silently turns the whole matrix off instead of just dimming it.
+    fn set_brightness(&mut self, val: u8) {
+        self.brightness = Some(val);
+        let Some(kb) = self.kb.clone() else { return };
+        let Ok(kb) = kb.lock() else { return };
+        if let Err(e) = kb.set_brightness(val) {
+            self.status = format!("Brightness: set failed: {e}");
         }
     }
 
@@ -480,11 +523,12 @@ impl App {
     /// worker state to track).
     fn color_shot(&mut self) {
         let gamma = *self.shared_gamma.lock().unwrap();
+        let variant = *self.shared_color_variant.lock().unwrap();
         let pending = self.pending_palette.clone();
         std::thread::spawn(move || {
             if let Ok(img) = palette::grab_active_monitor() {
-                let pixels = palette::filter_pixels(&palette::image_to_pixels(&img, 96));
-                *pending.lock().unwrap() = Some(palette::extract_dominant_palette(&pixels, gamma));
+                let pixels = palette::filter_pixels(&palette::image_to_pixels(&img, 600));
+                *pending.lock().unwrap() = Some(palette::pick_palette_for_pixels(&pixels, variant, gamma));
             }
         });
     }
@@ -497,6 +541,7 @@ impl App {
         self.stop_palette_worker();
 
         let gamma = self.shared_gamma.clone();
+        let color_variant = self.shared_color_variant.clone();
         let pending = self.pending_palette.clone();
         let wp_status = self.pending_wallpaper_status.clone();
         let stop = Arc::new(Mutex::new(false));
@@ -515,7 +560,8 @@ impl App {
                 Ok(path) => match palette::load_image_rgb(&path) {
                     Ok(img) => {
                         let g = *gamma.lock().unwrap();
-                        *pending.lock().unwrap() = Some(palette::pick_palette(palette::sample_zones(&img), g));
+                        let variant = *color_variant.lock().unwrap();
+                        *pending.lock().unwrap() = Some(palette::pick_palette_for_image(&img, variant, g));
                         *wp_status.lock().unwrap() = Some(format!("WPWatch: reading {}", path.display()));
                     }
                     Err(e) => *wp_status.lock().unwrap() = Some(format!("WPWatch: image load failed: {e}")),
@@ -569,6 +615,7 @@ impl App {
             self.monitors.get(self.selected_monitor - 1).map(|(name, _)| name.clone())
         };
         let gamma = self.shared_gamma.clone();
+        let color_variant = self.shared_color_variant.clone();
         let interval_ms = self.shared_ambient_interval_ms.clone();
         let pending = self.pending_palette.clone();
         let stop = Arc::new(Mutex::new(false));
@@ -583,7 +630,8 @@ impl App {
                 let t0 = std::time::Instant::now();
                 if let Ok(img) = palette::capture_tiny(0.15, output.as_deref()) {
                     let g = *gamma.lock().unwrap();
-                    let pal = palette::pick_palette(palette::sample_zones(&img), g);
+                    let variant = *color_variant.lock().unwrap();
+                    let pal = palette::pick_palette_for_image(&img, variant, g);
                     let changed = match &last {
                         None => true,
                         Some(l) => palette::palette_distance(l, &pal) >= 8.0,
@@ -742,6 +790,9 @@ impl eframe::App for App {
                         if ui.button("Connect").clicked() {
                             self.connect();
                         }
+                        if ui.add_enabled(self.kb.is_some(), egui::Button::new("Disconnect")).clicked() {
+                            self.disconnect();
+                        }
                     });
                 });
 
@@ -781,6 +832,17 @@ impl eframe::App for App {
                     if changed && self.render_thread.is_some() {
                         self.stop_bars();
                         self.start_bars();
+                    }
+                });
+            });
+
+            ui.add_enabled_ui(self.brightness.is_some(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_sized([SETTINGS_LABEL_WIDTH, 0.0], egui::Label::new("Brightness"));
+                    let mut val = self.brightness.unwrap_or(255);
+                    ui.spacing_mut().slider_width = ui.available_width() - 60.0;
+                    if ui.add(egui::Slider::new(&mut val, 0..=255)).changed() {
+                        self.set_brightness(val);
                     }
                 });
             });
@@ -957,6 +1019,34 @@ impl eframe::App for App {
             })
             .response
             .on_disabled_hover_text("needs Hyprland (hyprctl)");
+
+            ui.horizontal(|ui| {
+                ui.add_sized([SETTINGS_LABEL_WIDTH, 0.0], egui::Label::new("Color Mode"));
+                egui::ComboBox::from_id_salt("color_variant")
+                    .width(ui.available_width())
+                    .selected_text(self.color_variant.label())
+                    .show_ui(ui, |ui| {
+                        for &v in palette::ColorVariant::ALL {
+                            if ui.selectable_value(&mut self.color_variant, v, v.label()).clicked() {
+                                *self.shared_color_variant.lock().unwrap() = v;
+                                // WPWatch only re-fires on a wallpaper change
+                                // (inotifywait event) -- without a restart,
+                                // switching variants here would silently do
+                                // nothing until the wallpaper happens to
+                                // change. Ambient re-reads the variant every
+                                // loop iteration already, so it needs no
+                                // nudge (picks it up within one interval).
+                                if matches!(
+                                    self.palette_worker.as_ref().map(|w| w.kind),
+                                    Some(PaletteSourceKind::WpWatch)
+                                ) {
+                                    self.toggle_wpwatch();
+                                    self.toggle_wpwatch();
+                                }
+                            }
+                        }
+                    });
+            });
 
             ui.horizontal(|ui| {
                 ui.add_sized([SETTINGS_LABEL_WIDTH, 0.0], egui::Label::new("Gamma"));

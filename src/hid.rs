@@ -16,6 +16,20 @@ const FASTSET: u8 = 0x42;
 // namespaces since data[0] (VIA_LIGHTING_GET vs _SET) picks which one.
 const RGB_MODE: u8 = 0x41;
 const RGB_SUPPORTED: u8 = 0x42;
+// Standard VIA value for RGB Matrix brightness (quantum/via.c upstream,
+// needs firmware's VIA_QMK_RGB_MATRIX_ENABLE) -- sets rgb_matrix's hsv.v
+// directly without touching mode/enable. Unlike RGB_MODE/vialrgb_set_mode,
+// this is safe to use while a community-module effect (key_colors,
+// audio_visualizer) is active: VialRGB's own mode protocol can't represent
+// those effects and silently turns the matrix off if echoed back.
+//
+// 0x80, not via.h's `id_qmk_rgb_matrix_brightness = 1` -- upstream's
+// via_qmk_rgb_matrix_set_value()/get_value() (quantum/via.c) actually
+// switches on `id_qmk_rgblight_brightness` (the RGBLIGHT enum's value,
+// = 0x80), reusing it by historical accident instead of the RGB_MATRIX-
+// specific id. Confirmed by reading quantum/via.c's case labels directly,
+// not just via.h's enum.
+const RGB_MATRIX_BRIGHTNESS: u8 = 0x80;
 
 // Vial's own definition-fetch protocol (same one keypeek uses to read a
 // board's keymap layout) -- reused here to read rgb_matrix.layout instead of
@@ -186,6 +200,18 @@ impl VizKeyboard {
     pub fn get_info(&self) -> Result<(u16, u8), String> {
         let r = self.wr(&[VIA_LIGHTING_GET, GET_INFO])?;
         Ok((r[2] as u16 | ((r[3] as u16) << 8), r[4]))
+    }
+
+    /// Global rgb_matrix brightness (hsv.v), independent of whatever effect
+    /// is currently active -- see RGB_MATRIX_BRIGHTNESS above.
+    pub fn get_brightness(&self) -> Result<u8, String> {
+        let r = self.wr(&[VIA_LIGHTING_GET, RGB_MATRIX_BRIGHTNESS])?;
+        Ok(r[2])
+    }
+
+    pub fn set_brightness(&self, val: u8) -> Result<(), String> {
+        self.wr(&[VIA_LIGHTING_SET, RGB_MATRIX_BRIGHTNESS, val])?;
+        Ok(())
     }
 
     /// Switch firmware into audio_visualizer mode via Raw HID 0x02/0xA3

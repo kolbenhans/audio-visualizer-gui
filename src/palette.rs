@@ -1,38 +1,20 @@
-// Screen-capture palette sources -- port of send_palette_from_image.py,
-// send_palette_from_screen.py, ambient_screen.py (viz-frame-tools).
-//
-// Hyprland/Wayland-specific (grim for screenshots, hyprctl for monitor
-// geometry, Caelestia's wallpaper state file) -- same scope note as the
-// Python originals: other desktop environments need their own capture/
-// wallpaper backend.
 use crate::render::{Palette, N_LEVELS};
 use image::RgbImage;
+use material_colors::{color::Rgb as McRgb, hct::Hct};
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 
 const CAELESTIA_WALLPAPER_PATH: &str = ".local/state/caelestia/wallpaper/path.txt";
-// Omarchy 4 ("quattro"): no path.txt -- this is a symlink straight to the
-// current wallpaper image, recreated on every wallpaper change.
 const OMARCHY_WALLPAPER_PATH: &str = ".local/state/omarchy/current/background";
-// Omarchy 3: same symlink-to-image scheme, just under ~/.config instead of
-// ~/.local/state.
 const OMARCHY3_WALLPAPER_PATH: &str = ".config/omarchy/current/background";
-// hyprpaper: no state file at all, just its static config -- `wallpaper =
-// <monitor>,<path>` lines. Least reliable signal of the three (the file
-// existing doesn't mean hyprpaper is the active wallpaper daemon), so it's
-// checked last in detect_wallpaper_state_file_path().
 const HYPRPAPER_CONF_PATH: &str = ".config/hypr/hyprpaper.conf";
-// KDE Plasma: one `Image=file://<path>` line per wallpaper-plugin containment
-// (i.e. per virtual desktop/monitor) inside this INI file. First match wins,
-// same "good enough for single-wallpaper setups" tradeoff as hyprpaper.
 const KDE_PLASMA_CONF_PATH: &str = ".config/plasma-org.kde.plasma.desktop-appletsrc";
 
 fn quantize(v: u8, step: u8) -> u8 {
     (v / step) * step
 }
 
-/// brightness=1.35 is a fixed internal constant in the Python original --
-/// only `gamma` is user-adjustable (the GUI's Gamma slider).
 fn correct_for_keyboard_leds((r, g, b): (u8, u8, u8), gamma: f32) -> (u8, u8, u8) {
     const BRIGHTNESS: f32 = 1.35;
     let c = |v: u8| -> u8 {
@@ -69,11 +51,6 @@ pub fn palette_distance(a: &Palette, b: &Palette) -> f32 {
 
 // ── Wallpaper (Caelestia) ────────────────────────────────────────────────
 
-/// Auto-picks a wallpaper-state location at startup: first candidate that
-/// exists on disk wins (Caelestia checked first since it's the primary
-/// target), falling back to the Caelestia path so there's always a sane
-/// default to show/edit even if neither exists yet. Add more desktop
-/// environments' state locations here as they come up.
 pub fn detect_wallpaper_state_file_path() -> PathBuf {
     let candidates = [
         dirs_home().join(CAELESTIA_WALLPAPER_PATH),
@@ -85,8 +62,6 @@ pub fn detect_wallpaper_state_file_path() -> PathBuf {
     candidates.iter().find(|p| p.exists()).cloned().unwrap_or_else(|| candidates[0].clone())
 }
 
-/// `~` / `~/...` expansion for the user-editable override in the GUI --
-/// state file itself is always an absolute path once resolved.
 pub fn expand_home(input: &str) -> PathBuf {
     let input = input.trim();
     match input.strip_prefix("~/") {
@@ -100,13 +75,6 @@ fn strip_file_uri(v: &str) -> &str {
     v.strip_prefix("file://").unwrap_or(v)
 }
 
-/// Resolves a wallpaper-state location to the actual image path. Handles
-/// all known shapes without needing to be told which one it is:
-/// - Caelestia: the file's entire (trimmed) content *is* the image path.
-/// - hyprpaper.conf: scan for a `wallpaper = <monitor>,<path>` line.
-/// - KDE Plasma's appletsrc: scan for an `Image=file://<path>` line.
-/// - Omarchy: a symlink (or plain file) that already *is* the image, so
-///   falling through to using the state file itself covers it.
 pub fn current_wallpaper_path(state_file: &std::path::Path) -> Result<PathBuf, String> {
     if let Ok(text) = std::fs::read_to_string(state_file) {
         let trimmed = text.trim();
@@ -145,10 +113,6 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
 }
 
-/// `image::open()` guesses format from the file *extension* -- breaks for
-/// extensionless wallpaper symlinks (Omarchy's `current/background` has no
-/// `.jpg`/`.png` suffix even though it resolves to one). Guess from the
-/// actual file content instead.
 pub fn load_image_rgb(path: &std::path::Path) -> Result<RgbImage, String> {
     image::ImageReader::open(path)
         .map_err(|e| e.to_string())?
@@ -159,8 +123,68 @@ pub fn load_image_rgb(path: &std::path::Path) -> Result<RgbImage, String> {
         .map_err(|e| e.to_string())
 }
 
-// ── grim capture ─────────────────────────────────────────────────────────
+#[cfg(windows)]
+mod win {
+    use image::RgbImage;
 
+    fn to_rgb(img: xcap::image::RgbaImage) -> RgbImage {
+        image::DynamicImage::ImageRgba8(img).to_rgb8()
+    }
+
+    pub fn grab_active_monitor() -> Result<RgbImage, String> {
+        let windows = xcap::Window::all().map_err(|e| e.to_string())?;
+        let focused = windows
+            .iter()
+            .find(|w| w.is_focused().unwrap_or(false))
+            .ok_or("no focused window")?;
+        let monitor = focused.current_monitor().map_err(|e| e.to_string())?;
+        monitor.capture_image().map(to_rgb).map_err(|e| e.to_string())
+    }
+
+    pub fn capture_tiny(scale: f32, output: Option<&str>) -> Result<RgbImage, String> {
+        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let monitor = match output {
+            Some(name) => monitors
+                .iter()
+                .find(|m| m.name().map(|n| n == name).unwrap_or(false))
+                .ok_or_else(|| format!("monitor {name} not found"))?,
+            None => monitors
+                .iter()
+                .find(|m| m.is_primary().unwrap_or(false))
+                .or_else(|| monitors.first())
+                .ok_or("no monitors found")?,
+        };
+        let img = to_rgb(monitor.capture_image().map_err(|e| e.to_string())?);
+        let (w, h) = img.dimensions();
+        let (nw, nh) = (((w as f32 * scale).max(1.0)) as u32, ((h as f32 * scale).max(1.0)) as u32);
+        Ok(image::imageops::thumbnail(&img, nw, nh))
+    }
+
+    pub fn list_monitors() -> Vec<(String, String)> {
+        let Ok(monitors) = xcap::Monitor::all() else {
+            return Vec::new();
+        };
+        monitors
+            .iter()
+            .filter_map(|m| {
+                let name = m.name().ok()?;
+                let (w, h) = (m.width().ok()?, m.height().ok()?);
+                Some((name.clone(), format!("{name} ({w}×{h})")))
+            })
+            .collect()
+    }
+
+    pub fn is_hyprland() -> bool {
+        true
+    }
+}
+
+#[cfg(windows)]
+pub use win::{capture_tiny, grab_active_monitor, is_hyprland, list_monitors};
+
+// ── grim capture (Linux/Hyprland) ───────────────────────────────────────
+
+#[cfg(unix)]
 fn get_active_monitor_geometry() -> Result<String, String> {
     let active: serde_json::Value = run_json(&["hyprctl", "activewindow", "-j"])?;
     let monitor_id = active["monitor"].as_i64().ok_or("no active monitor")?;
@@ -175,11 +199,13 @@ fn get_active_monitor_geometry() -> Result<String, String> {
     ))
 }
 
+#[cfg(unix)]
 fn run_json(cmd: &[&str]) -> Result<serde_json::Value, String> {
     let out = Command::new(cmd[0]).args(&cmd[1..]).output().map_err(|e| e.to_string())?;
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+#[cfg(unix)]
 pub fn grab_active_monitor() -> Result<RgbImage, String> {
     let geometry = get_active_monitor_geometry()?;
     let out = Command::new("grim")
@@ -189,8 +215,7 @@ pub fn grab_active_monitor() -> Result<RgbImage, String> {
     image::load_from_memory(&out.stdout).map(|i| i.to_rgb8()).map_err(|e| e.to_string())
 }
 
-/// scale: fraction of full resolution (Python's ambient_screen.py default 0.05,
-/// AmbientWorker uses 0.15). output: Hyprland monitor name, or None for all.
+#[cfg(unix)]
 pub fn capture_tiny(scale: f32, output: Option<&str>) -> Result<RgbImage, String> {
     let mut cmd = Command::new("grim");
     cmd.args(["-s", &scale.to_string()]);
@@ -202,15 +227,13 @@ pub fn capture_tiny(scale: f32, output: Option<&str>) -> Result<RgbImage, String
     image::load_from_memory(&out.stdout).map(|i| i.to_rgb8()).map_err(|e| e.to_string())
 }
 
-/// Set by Hyprland itself in every session it runs (same signal `hyprctl`
-/// relies on internally) -- lets the UI grey out Hyprland-only controls
-/// (Color-Shot, Ambient, monitor picker) instead of leaving them clickable
-/// and silently doing nothing on other compositors.
+#[cfg(unix)]
 pub fn is_hyprland() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
 }
 
 /// (name, "name (WxH)") for every Hyprland output, via `hyprctl monitors -j`.
+#[cfg(unix)]
 pub fn list_monitors() -> Vec<(String, String)> {
     let Ok(monitors) = run_json(&["hyprctl", "monitors", "-j"]) else {
         return Vec::new();
@@ -228,6 +251,138 @@ pub fn list_monitors() -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ── Variant color boost ──────────────────────────────────────────────────
+// First attempt here ran every pixel through Google's Material Color
+// Utilities DynamicScheme from one seed color (matugen/Caelestia's
+// approach). Turned out wrong for this: that machinery is tuned for
+// generating a single harmonious *UI theme* from one seed, not "give me N
+// bold, varied colors from this image". Several variants (TonalSpot,
+// Rainbow, FruitSalad, Content, ...) reuse the same hue for primary and
+// secondary, Vibrant/Expressive's "distinct" hue rotations are small for
+// some seed hues and huge for others (hand-tuned per hue bucket, by
+// Google's own design), and `error_palette` is hardcoded red regardless of
+// variant. Net effect: washed-out, same-ish, or off-topic colors -- see
+// conversation history.
+//
+// This instead stays on the existing dominant-cluster extraction (the same
+// one Zones/extract_dominant_palette uses -- real, distinct colors already
+// present in the image) and only uses HCT to push each picked color's
+// chroma/tone, keeping its real hue. "Variant" now means two knobs: how
+// spread-out the picks must be (`spread`, the cluster dedup distance) and
+// how hard chroma/tone get pushed (`chroma`/`tone`).
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorVariant {
+    /// The original per-source extraction (sample_zones for WPWatch/
+    /// Ambient, extract_dominant_palette for Color-Shot) -- literal colors
+    /// from the image, no boosting.
+    Zones,
+    TonalSpot,
+    Vibrant,
+    Expressive,
+    FruitSalad,
+    Rainbow,
+    Content,
+    Neutral,
+}
+
+impl ColorVariant {
+    pub const ALL: &'static [ColorVariant] = &[
+        Self::Zones,
+        Self::TonalSpot,
+        Self::Vibrant,
+        Self::Expressive,
+        Self::FruitSalad,
+        Self::Rainbow,
+        Self::Content,
+        Self::Neutral,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Zones => "Zones (default)",
+            Self::TonalSpot => "Tonal Spot",
+            Self::Vibrant => "Vibrant",
+            Self::Expressive => "Expressive",
+            Self::FruitSalad => "Fruit Salad",
+            Self::Rainbow => "Rainbow",
+            Self::Content => "Content",
+            Self::Neutral => "Neutral",
+        }
+    }
+
+    /// (cluster spread, min chroma, chroma multiplier, forced tone).
+    /// Spread is the minimum plain-RGB distance enforced between the 5
+    /// picked colors (see dominant_colors) -- higher forces a wider hue
+    /// spread when the image actually has one (Rainbow/Expressive/
+    /// FruitSalad), lower keeps a tighter, more cohesive set (TonalSpot/
+    /// Neutral). Tone of None keeps each color's own extracted brightness
+    /// instead of forcing one (Content, which means "stay close to the
+    /// source" in Material You too).
+    fn boost(&self) -> Option<Boost> {
+        Some(match self {
+            Self::Zones => return None,
+            Self::TonalSpot => Boost { spread: 40.0, min_chroma: 25.0, chroma_mult: 1.15, tone: Some(52.0) },
+            Self::Content => Boost { spread: 40.0, min_chroma: 10.0, chroma_mult: 1.0, tone: None },
+            Self::Neutral => Boost { spread: 25.0, min_chroma: 0.0, chroma_mult: 0.5, tone: Some(55.0) },
+            Self::Vibrant => Boost { spread: 50.0, min_chroma: 55.0, chroma_mult: 1.6, tone: Some(50.0) },
+            Self::FruitSalad => Boost { spread: 65.0, min_chroma: 50.0, chroma_mult: 1.4, tone: Some(58.0) },
+            Self::Expressive => Boost { spread: 70.0, min_chroma: 55.0, chroma_mult: 1.5, tone: Some(50.0) },
+            Self::Rainbow => Boost { spread: 85.0, min_chroma: 50.0, chroma_mult: 1.4, tone: Some(55.0) },
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Boost {
+    spread: f32,
+    min_chroma: f64,
+    chroma_mult: f64,
+    tone: Option<f64>,
+}
+
+/// Picks N_LEVELS distinct dominant colors out of `pixels` (see
+/// dominant_colors) and pushes each one's HCT chroma/tone per `variant`,
+/// keeping every color's real hue. Returns None for ColorVariant::Zones
+/// (caller should use the per-source method instead).
+pub fn pick_palette_variant(pixels: &[(u8, u8, u8)], variant: ColorVariant, gamma: f32) -> Option<Palette> {
+    let boost = variant.boost()?;
+    let colors = dominant_colors(pixels, boost.spread);
+
+    let mut out = [(0u8, 0u8, 0u8); N_LEVELS];
+    for i in 0..N_LEVELS {
+        let (r, g, b) = colors[i];
+        let hct = Hct::new(McRgb::new(r, g, b));
+        let chroma = (hct.get_chroma() * boost.chroma_mult).max(boost.min_chroma);
+        let tone = boost.tone.unwrap_or_else(|| hct.get_tone());
+        let boosted: McRgb = Hct::from(hct.get_hue(), chroma, tone).into();
+        out[i] = correct_for_keyboard_leds((boosted.red, boosted.green, boosted.blue), gamma);
+    }
+    Some(out)
+}
+
+/// WPWatch/Ambient entry point: boosted dominant colors for any variant,
+/// falling back to the original sample_zones extraction for
+/// ColorVariant::Zones. 600 (vs. the 96 image_to_pixels' other two callers
+/// use) because a thumbnail that small can blur away a thin accent (a neon
+/// sign, a small flower) entirely before the color histogram ever sees it
+/// -- confirmed by testing a busy wallpaper where real, highly-saturated
+/// accent colors simply weren't in the pixel data anymore at 96-150px.
+/// Only costs anything on WPWatch (loads the full-res wallpaper file) --
+/// Ambient's own grim capture is already downscaled well below 600px by
+/// its own `-s` scale flag (see capture_tiny), so this is a no-op there.
+pub fn pick_palette_for_image(img: &RgbImage, variant: ColorVariant, gamma: f32) -> Palette {
+    let pixels = filter_pixels(&image_to_pixels(img, 600));
+    pick_palette_variant(&pixels, variant, gamma).unwrap_or_else(|| pick_palette(sample_zones(img), gamma))
+}
+
+/// Color-Shot entry point: same idea as pick_palette_for_image, but for
+/// callers that already have a filtered pixel list (Color-Shot samples the
+/// screen grab down to a pixel list before this point, see main.rs).
+pub fn pick_palette_for_pixels(pixels: &[(u8, u8, u8)], variant: ColorVariant, gamma: f32) -> Palette {
+    pick_palette_variant(pixels, variant, gamma).unwrap_or_else(|| extract_dominant_palette(pixels, gamma))
 }
 
 // ── ambient_screen.py: sample_zones + pick_palette ──────────────────────
@@ -302,7 +457,10 @@ pub fn filter_pixels(pixels: &[(u8, u8, u8)]) -> Vec<(u8, u8, u8)> {
 
 // ── send_palette_from_screen.py: extract_dominant_palette ───────────────
 
-pub fn extract_dominant_palette(pixels: &[(u8, u8, u8)], gamma: f32) -> Palette {
+/// Quantized color histogram, scored by count × saturation and sorted
+/// best-first -- shared by extract_dominant_palette and dominant_colors
+/// (both take the top N, deduped at their own distance threshold).
+fn dominant_candidates(pixels: &[(u8, u8, u8)]) -> Vec<((u8, u8, u8), u32, f32)> {
     use std::collections::HashMap;
     let mut counts: HashMap<(u8, u8, u8), u32> = HashMap::new();
     for &(r, g, b) in pixels {
@@ -323,18 +481,39 @@ pub fn extract_dominant_palette(pixels: &[(u8, u8, u8)], gamma: f32) -> Palette 
         candidates = valid;
     }
 
+    // Count capped, saturation weighted hard: an image can have a vivid
+    // accent color (neon sign, a single flower) outnumbered 50:1 by a
+    // large muted area (sky, wall, haze) -- with count uncapped and a mild
+    // saturation exponent, that accent never outranks the muted area no
+    // matter how vivid, so it never gets picked. Found by checking what
+    // dominant_candidates actually returned for a busy neon-cyberpunk
+    // wallpaper: real, highly-saturated green/yellow neon text sat ~200+
+    // ranked in the hundreds, buried under tens of thousands of a
+    // moderately-saturated (~100-150) blue haze.
+    const COUNT_CAP: u32 = 1500;
     candidates.sort_by(|a, b| {
-        let score_a = a.1 as f32 * (a.2 + 1.0).powf(1.3);
-        let score_b = b.1 as f32 * (b.2 + 1.0).powf(1.3);
+        let score = |count: u32, sat: f32| count.min(COUNT_CAP) as f32 * (sat + 1.0).powf(2.2);
+        let score_a = score(a.1, a.2);
+        let score_b = score(b.1, b.2);
         score_b.partial_cmp(&score_a).unwrap()
     });
+    candidates
+}
+
+/// Up to N_LEVELS distinct dominant colors in `pixels`, best-first, each at
+/// least `min_dist` (plain RGB euclidean) apart -- padded by repeating the
+/// last pick if the image doesn't have N_LEVELS distinct-enough colors.
+/// Shared by extract_dominant_palette (fixed 40.0 spread) and
+/// pick_palette_variant (spread set per ColorVariant, see Boost).
+fn dominant_colors(pixels: &[(u8, u8, u8)], min_dist: f32) -> [(u8, u8, u8); N_LEVELS] {
+    let candidates = dominant_candidates(pixels);
 
     let mut selected: Vec<(u8, u8, u8)> = Vec::new();
     for (color, _, _) in &candidates {
         if selected.len() >= N_LEVELS {
             break;
         }
-        if selected.iter().any(|&s| dist(*color, s) < 40.0) {
+        if selected.iter().any(|&s| dist(*color, s) < min_dist) {
             continue;
         }
         selected.push(*color);
@@ -343,9 +522,79 @@ pub fn extract_dominant_palette(pixels: &[(u8, u8, u8)], gamma: f32) -> Palette 
         selected.push(selected.last().copied().unwrap_or((16, 16, 16)));
     }
 
+    std::array::from_fn(|i| selected[i])
+}
+
+pub fn extract_dominant_palette(pixels: &[(u8, u8, u8)], gamma: f32) -> Palette {
+    let selected = dominant_colors(pixels, 40.0);
     let mut out = [(0u8, 0u8, 0u8); N_LEVELS];
     for i in 0..N_LEVELS {
         out[i] = correct_for_keyboard_leds(selected[i], gamma);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 5 clearly distinct, saturated colors, each repeated so it dominates
+    /// the histogram -- enough for dominant_colors to find N_LEVELS
+    /// distinct clusters at any of the Boost presets' spread values.
+    fn rainbow_pixels() -> Vec<(u8, u8, u8)> {
+        let base = [(220u8, 30u8, 30u8), (30, 200, 60), (40, 80, 230), (230, 200, 30), (190, 40, 190)];
+        base.iter().cycle().take(50 * base.len()).copied().collect()
+    }
+
+    // Regression guard for the bugs found by actually rendering the output
+    // across iterations of this (see the Boost doc comment for what didn't
+    // work: single-seed DynamicScheme converged every variant toward
+    // pale/same-ish/off-hue colors regardless of the image).
+    #[test]
+    fn variant_palettes_differ_and_stay_saturated() {
+        let pixels = rainbow_pixels();
+        let gamma = 1.6;
+        let tonal_spot = pick_palette_variant(&pixels, ColorVariant::TonalSpot, gamma).unwrap();
+        let vibrant = pick_palette_variant(&pixels, ColorVariant::Vibrant, gamma).unwrap();
+        let rainbow = pick_palette_variant(&pixels, ColorVariant::Rainbow, gamma).unwrap();
+
+        assert_ne!(tonal_spot, vibrant, "variants should differ for the same image");
+        assert_ne!(vibrant, rainbow, "variants should differ for the same image");
+
+        for (name, pal) in [("Vibrant", vibrant), ("Rainbow", rainbow)] {
+            let near_white = pal.iter().filter(|&&(r, g, b)| r > 230 && g > 230 && b > 230).count();
+            assert!(near_white < N_LEVELS, "{name}: too many near-white levels: {pal:?}");
+            let washed_out = pal.iter().filter(|&&c| saturation(c) < 40).count();
+            assert!(washed_out == 0, "{name}: expected all levels saturated, got {pal:?}");
+        }
+
+        assert!(pick_palette_variant(&pixels, ColorVariant::Zones, gamma).is_none());
+    }
+}
+
+#[cfg(test)]
+mod preview_debug {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn preview_variants_on_wallpaper() {
+        let path_str = std::env::var("PREVIEW_WALLPAPER").expect("set PREVIEW_WALLPAPER");
+        let out_path = std::env::var("PREVIEW_OUT").expect("set PREVIEW_OUT");
+        let img = load_image_rgb(std::path::Path::new(&path_str)).expect("load wallpaper");
+
+        let mut out = image::RgbImage::new(5 * 60, ColorVariant::ALL.len() as u32 * 40);
+        for (row, &variant) in ColorVariant::ALL.iter().enumerate() {
+            let pal = pick_palette_for_image(&img, variant, 1.6);
+            println!("{:>16}: {:?}", variant.label(), pal);
+            for (col, &(r, g, b)) in pal.iter().enumerate() {
+                for y in 0..40u32 {
+                    for x in 0..60u32 {
+                        out.put_pixel(col as u32 * 60 + x, row as u32 * 40 + y, image::Rgb([r, g, b]));
+                    }
+                }
+            }
+        }
+        out.save(&out_path).unwrap();
+    }
 }
